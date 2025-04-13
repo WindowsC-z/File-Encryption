@@ -1,72 +1,93 @@
-# 文件加密
-### 📖 详细使用说明
+# File Encryption
+### 📖 Detailed User Manual
 
-#### 环境准备
-1. 安装Python 3.8+
-2. 安装依赖库：
+#### Environmental preparedness
+1. Install Python 3.8+
+2. Install dependency libraries：
 ```bash
 pip install cryptography tqdm
 ```
 
-#### 基本使用
+#### Basic usage
 
-🔒 **加密文件**：
+🔒 **Encrypted file**：
 ```bash
-python file_cipher.py -e -i 敏感文件.pdf
+python file_cipher.py -e -i Sensitive_file.pdf
 ```
-程序将：
-1. 提示输入密码（输入时不会显示）
-2. 生成加密文件 `敏感文件.pdf.enc`
-3. 显示加密进度条
+The procedure will:
+1. Prompt for password (not displayed when entered )
+2, Generate encrypted Files "Sensitive_Files.pdf.enc"
+3. Show encrypted progress bar
 
-🔓 **解密文件**：
+🔓 **Declassified documents**：
 ```bash
-python file_cipher.py -d -i 敏感文件.pdf.enc
+python file_cipher.py -d -i Sensitive_file.pdf.enc
 ```
-程序将：
-1. 提示输入密码
-2. 生成解密文件 `敏感文件.pdf.dec`
-3. 显示解密进度条
-4. 自动验证文件完整性
+The procedure will:
+1. Prompt for a password
+2. Generate decrypted files "sensitive_files. pdf. dec"
+3. Show decryption progress bar
+4. Automatic Verification of Document Integrity
    
-🔓 **参数**：
-  -h, --help            show this help message and exit
-  -e, --encrypt         加密模式
-  -d, --decrypt         解密模式
+🔓 **Parameter**：
+  -h, --help            Show this help message and exit
+  -e, --encrypt         Encryption mode
+  -d, --decrypt         Decryption mode
   -i INPUT [INPUT ...], --input INPUT [INPUT ...]
-                        输入文件路径（支持多个文件）
+                        Input file path (multiple files supported)
   -o OUTPUT, --output OUTPUT
-                        输出目录路径（可选）
-  -r, --recursive       递归处理目录
+                        Output directory path (optional )
+  -r, --recursive       Recursive Processing Directory
 
-#### 高级选项
+#### Advanced options
 
-📂 **指定输出文件**：
+📂 **Specify the output file**：
 ```bash
 python file_cipher.py -e -i data.xlsx -o secured_data.enc
 python file_cipher.py -d -i secured_data.enc -o decrypted.xlsx
 ```
-📂 **批量加密文件**：
+📂 **Bulk encryption file**：
 ```bashi
-python file_cipher.py -e -i 指定加密目录 -o 指定输出目录 --recursive
+python file_cipher.py -e -i Encryption_directory -o Output_directory --recursive
+```
+   - Entering the password will recursively encrypt all files (including subdirectories) under the 'test' tree directory
+   - The encrypted files are saved in the 'encrypted' Resolve directory, keeping the original directory structure
+   - For example：
+     ```
+     c:/apps/test/doc/secret.txt 
+     → c:/apps/encrypted/doc/secret.txt.enc
+     ```
+📂 **Bulk decryption file**：
+```bashi
+python file_cipher.py -d -i Encryption_directory -o Output_directory --recursive
 ```
 
-🔐 **密码安全特性**：
-- 密码长度建议至少12字符
-- 支持特殊字符和空格
-- 密码错误会立即终止解密
+🔐 **Password Security Features**：
+- The recommended password length is at least 12 characters
+- Support for special characters and spaces
+- A password error will immediately stop decryption
 
 
-#### ⚠️ 重要注意事项
+#### ⚠️ Important note
 
-1. **密码管理**：
-   - 丢失密码将导致数据永久不可恢复
-   - 建议使用密码管理器保存密码
+1. **Password Management**：
+   - Lost Password Will Result Data Permanently Unrecoverable
+   - Recommended Use Password Manager to Save Password
 
-2. **文件扩展名**：
-   - 加密文件自动添加 `.enc` 扩展名
-   - 解密文件自动添加 `.dec` 扩展名
+2. **File extension**：
+   - encrypted files are automatically added with the ".enc" extension
+   - decrypt file to automatically add ".dec" extension
 
-3. **异常处理**：
-   - 按Ctrl+C可安全中止操作
-   - 网络驱动器建议先复制到本地操作
+3. **Exception Handling**：
+   - Press Ctrl + C to safely abort the operation
+   - Network Drive recommendation to copy to local operation first
+     
+4. **Symbolic Link Processing**：
+   - Does not follow symbolic links by default (additional code support required )
+   
+5. **Empty directory retention**：
+   - Empty directories will not be preserved after encryption (to be handled separately)
+     
+6. **Permission issues**：
+   - Windows systems need to run as an administrator to encrypt system files
+
