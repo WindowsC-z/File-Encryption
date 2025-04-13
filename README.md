@@ -28,6 +28,7 @@ python file_cipher.py -d -i 敏感文件.pdf.enc
 2. 生成解密文件 `敏感文件.pdf.dec`
 3. 显示解密进度条
 4. 自动验证文件完整性
+   
 🔓 **参数**：
   -h, --help            show this help message and exit
   -e, --encrypt         加密模式
