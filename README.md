@@ -15,7 +15,7 @@ pip install cryptography tqdm
 python file_cipher.py -e -i Sensitive_file.pdf
 ```
 The procedure will:
-1. Prompt for password (not displayed when entered )
+1. Prompt for password (not displayed when entered)
 2, Generate encrypted Files "Sensitive_Files.pdf.enc"
 3. Show encrypted progress bar
 
@@ -51,7 +51,7 @@ python file_cipher.py -d -i secured_data.enc -o decrypted.xlsx
 python file_cipher.py -e -i Encryption_directory -o Output_directory --recursive
 ```
    - Entering the password will recursively encrypt all files (including subdirectories) under the 'test' tree directory
-   - The encrypted files are saved in the 'encrypted' Resolve directory, keeping the original directory structure
+   - The encrypted files are stored in the `encrypted` directory, maintaining the original directory structure
    - For example：
      ```
      c:/apps/test/doc/secret.txt 
