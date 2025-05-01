@@ -1,4 +1,4 @@
-###安全文件加密工具 v5.0（支持批量处理）###
+### 安全文件加密工具 v5.0（支持批量处理
 
 options:
   -h, --help            show this help message and exit
@@ -15,5 +15,5 @@ options:
 private_key.pem
            加密整个目录：python cipher.py -e -i my_folder -k public_key.pem -r 解密文件python cipher.py -d -i my_folder -k private_key.pem -r
 
-#生成密钥对#
+# 生成密钥对
 运行generate_keys.py  将在其工作目录下生成public_key.pem和private_key.pem
