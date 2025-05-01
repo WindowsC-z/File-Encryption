@@ -4,226 +4,126 @@ import base64
 import tempfile
 import sys
 import logging
+import re
 from getpass import getpass
 from tqdm import tqdm
 from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives import hashes, padding
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.asymmetric import rsa, padding as asym_padding
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from hashlib import blake2b
+import hmac
 
-# 配置参数
+# 安全配置参数
 CHUNK_SIZE = 64 * 1024        # 64KB分块处理
 RSA_KEY_SIZE = 4096           # RSA密钥长度
 SALT_LENGTH = 32              # 盐值长度
-IV_AES_LENGTH = 16            # AES初始化向量长度
-NONCE_CHACHA_LENGTH = 12      # ChaCha20随机数长度
-DERIVED_KEY_LENGTH = 128      # 派生密钥长度
+NONCE_LENGTH = 12             # ChaCha20随机数长度
+SCRYPT_KEY_LENGTH = 32        # 派生密钥长度
+MIN_PASSWORD_LENGTH = 12      # 最小密码长度
+HMAC_KEY_LENGTH = 64          # HMAC密钥长度
 
 # 日志配置
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('cipher.log'),
+        logging.FileHandler('secure_cipher.log'),
         logging.StreamHandler()
     ]
 )
 
-class StreamProcessor:
-    """流式填充处理器"""
-    def __init__(self, mode='encrypt'):
-        if mode not in ['encrypt', 'decrypt']:
-            raise ValueError("模式必须是 'encrypt' 或 'decrypt'")
-        
-        self.mode = mode
-        self.buffer = bytearray()
-        self.processor = (
-            padding.PKCS7(128).padder() if mode == 'encrypt'
-            else padding.PKCS7(128).unpadder()
-        )
-
-    def process_chunk(self, chunk, is_final=False):
-        self.buffer.extend(chunk)
-        if not is_final:
-            return b''
-
-        try:
-            # 处理空文件特殊情况
-            if not self.buffer and self.mode == 'encrypt':
-                self.buffer = bytearray(b'\x10' * 16)  # PKCS7填充空文件
-
-            processed = self.processor.update(bytes(self.buffer)) + self.processor.finalize()
-            
-            # 加密时验证块大小
-            if self.mode == 'encrypt' and len(processed) % 16 != 0:
-                raise ValueError(f"填充后数据长度异常：{len(processed)}字节")
-            
-            return processed
-        except ValueError as e:
-            raise RuntimeError(f"填充错误：{str(e)}") from e
-        finally:
-            self.buffer.clear()
-
 class SecureFileCipher:
-    """安全文件加密器（修复上下文管理器问题版）"""
+    """安全文件加密器（修复版）"""
     def __init__(self, password):
-        if len(password) < 12:
-            logging.warning("建议使用至少12个字符的强密码")
+        self._validate_password(password)
         self.password = password.encode('utf-8')
         self.backend = default_backend()
 
+    def _validate_password(self, password):
+        """强制密码复杂度策略"""
+        if len(password) < MIN_PASSWORD_LENGTH:
+            raise ValueError(f"密码至少需要{MIN_PASSWORD_LENGTH}个字符")
+        if not re.search(r"[A-Z]", password):
+            raise ValueError("密码必须包含至少一个大写字母")
+        if not re.search(r"[a-z]", password):
+            raise ValueError("密码必须包含至少一个小写字母")
+        if not re.search(r"\d", password):
+            raise ValueError("密码必须包含至少一个数字")
+        if not re.search(r"[!@#$%^&*()_+=-]", password):
+            raise ValueError("密码必须包含至少一个特殊符号")
+
     def _derive_keys(self, salt):
-        """密钥派生函数"""
-        try:
-            # 第一层：Scrypt密钥拉伸
-            kdf1 = Scrypt(
-                salt=salt,
-                length=96,
-                n=2**20,
-                r=8,
-                p=3,
-                backend=self.backend
-            )
-            intermediate_key = kdf1.derive(self.password)
+        """安全的密钥派生函数（Scrypt）"""
+        kdf = Scrypt(
+            salt=salt,
+            length=SCRYPT_KEY_LENGTH + HMAC_KEY_LENGTH,
+            n=2**20,  # 符合OWASP推荐参数
+            r=8,
+            p=1,
+            backend=self.backend
+        )
+        derived = kdf.derive(self.password)
+        return derived[:SCRYPT_KEY_LENGTH], derived[SCRYPT_KEY_LENGTH:]
 
-            # 第二层：PBKDF2-HMAC
-            kdf2 = PBKDF2HMAC(
-                algorithm=hashes.SHA3_512(),
-                length=DERIVED_KEY_LENGTH,
-                salt=salt[::-1],
-                iterations=200000,
-                backend=self.backend
-            )
-            derived_key = kdf2.derive(intermediate_key)
-            
-            if len(derived_key) != DERIVED_KEY_LENGTH:
-                raise ValueError(f"派生密钥长度错误：预期{DERIVED_KEY_LENGTH}字节，实际{len(derived_key)}字节")
-            
-            return derived_key
-        except Exception as e:
-            raise RuntimeError(f"密钥派生失败：{str(e)}") from e
+    def _generate_header(self, salt, nonce, hmac_key):
+        """生成带HMAC签名的文件头"""
+        header_data = salt + nonce
+        signature = hmac.new(hmac_key, header_data, digestmod=blake2b).digest()
+        return header_data + signature
 
-    def _validate_encryption_params(self, keys, iv_aes, nonce_chacha):
-        """加密参数验证"""
-        param_checks = [
-            (keys[0], 32, "AES密钥"),
-            (keys[1], 32, "ChaCha20密钥"),
-            (iv_aes, IV_AES_LENGTH, "AES IV"),
-            (nonce_chacha, NONCE_CHACHA_LENGTH, "ChaCha20 Nonce")
-        ]
+    def _validate_header(self, header, hmac_key):
+        """验证文件头完整性"""
+        if len(header) != SALT_LENGTH + NONCE_LENGTH + 64:
+            raise ValueError("无效的文件头长度")
         
-        for param, expected_len, name in param_checks:
-            if len(param) != expected_len:
-                raise ValueError(f"{name}长度错误：预期{expected_len}字节，实际{len(param)}字节")
+        header_data = header[:SALT_LENGTH+NONCE_LENGTH]
+        received_signature = header[SALT_LENGTH+NONCE_LENGTH:]
+        
+        expected_signature = hmac.new(hmac_key, header_data, digestmod=blake2b).digest()
+        if not hmac.compare_digest(received_signature, expected_signature):
+            raise ValueError("文件头完整性验证失败")
 
-    def _encrypt_chunk(self, chunk, keys, iv_aes, nonce_chacha):
-        """修复后的分块加密方法"""
-        try:
-            self._validate_encryption_params(keys, iv_aes, nonce_chacha)
-            
-            # 创建加密器（移除with语句）
-            encryptor = Cipher(
-                algorithms.AES(keys[0]),
-                modes.CBC(iv_aes),
-                backend=self.backend
-            ).encryptor()
-            
-            aes_encrypted = encryptor.update(chunk) + encryptor.finalize()
-            
-            # ChaCha20-Poly1305二次加密
-            chacha = ChaCha20Poly1305(keys[1])
-            return chacha.encrypt(nonce_chacha, aes_encrypted, None)
-        except Exception as e:
-            logging.error(f"分块加密失败：{str(e)}")
-            raise
-
-    def _generate_rsa_components(self):
-        """生成 RSA 私钥和公钥"""
-        try:
-            # 生成 RSA 私钥
-            private_key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=RSA_KEY_SIZE,
-                backend=self.backend
-            )
-            # 从私钥派生公钥
-            public_key = private_key.public_key()
-            return private_key, public_key
-        except Exception as e:
-            raise RuntimeError(f"RSA 密钥生成失败：{str(e)}") from e
-
-    def encrypt_file(self, input_path, output_path):
-        """加密文件主流程"""
+    def encrypt_file(self, input_path, output_path, pub_key):
+        """安全加密流程"""
         logging.info(f"启动加密：{input_path} → {output_path}")
         
         try:
             # 生成加密参数
             salt = os.urandom(SALT_LENGTH)
-            iv_aes = os.urandom(IV_AES_LENGTH)
-            nonce_chacha = os.urandom(NONCE_CHACHA_LENGTH)
-            derived_key = self._derive_keys(salt)
-            keys = (
-                derived_key[:32],   # AES-256
-                derived_key[32:64], # ChaCha20
-                derived_key[64:96], # RSA包装密钥
-                derived_key[96:]    # HMAC密钥
-            )
+            nonce = os.urandom(NONCE_LENGTH)
+            chacha_key, hmac_key = self._derive_keys(salt)
             
-            # 生成RSA组件
-            priv_key, pub_key = self._generate_rsa_components()
-            rsa_encrypted_key = pub_key.encrypt(
-                keys[0],
+            # 使用RSA公钥加密ChaCha密钥
+            encrypted_key = pub_key.encrypt(
+                chacha_key,
                 asym_padding.OAEP(
-                    mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+                    mgf=asym_padding.MGF1(algorithm=hashes.SHA512()),
                     algorithm=hashes.SHA512(),
                     label=None
                 )
             )
             
-            # 构建文件头
-            header = (
-                salt
-                + iv_aes
-                + nonce_chacha
-                + rsa_encrypted_key
-                + priv_key.private_bytes(
-                    encoding=serialization.Encoding.DER,
-                    format=serialization.PrivateFormat.PKCS8,
-                    encryption_algorithm=serialization.NoEncryption()
-                )
-            )
+            # 构建带签名的文件头
+            header = self._generate_header(salt, nonce, hmac_key)
             
             # 计算文件哈希
             file_hash = self._calculate_file_hash(input_path)
             
             with open(input_path, 'rb') as fin, open(output_path, 'wb') as fout:
-                # 写入文件头
+                # 写入元数据
                 fout.write(base64.urlsafe_b64encode(header) + b'\n')
+                fout.write(base64.urlsafe_b64encode(encrypted_key) + b'\n')
                 fout.write(base64.urlsafe_b64encode(file_hash) + b'\n')
                 
-                # 流式处理
-                processor = StreamProcessor('encrypt')
-                file_size = os.path.getsize(input_path)
-                
-                with tqdm(total=file_size, unit='B', unit_scale=True, desc="加密进度") as pbar:
-                    while True:
-                        chunk = fin.read(CHUNK_SIZE)
-                        is_final = not chunk
-                        processed = processor.process_chunk(chunk, is_final=is_final)
-                        
-                        if processed:
-                            encrypted = self._encrypt_chunk(processed, keys, iv_aes, nonce_chacha)
-                            fout.write(base64.urlsafe_b64encode(encrypted) + b'\n')
-                        
-                        if is_final:
-                            break
-                        pbar.update(len(chunk))
+                # 一次性加密整个文件
+                cipher = ChaCha20Poly1305(chacha_key)
+                plaintext = fin.read()
+                encrypted = cipher.encrypt(nonce, plaintext, None)
+                fout.write(base64.urlsafe_b64encode(encrypted) + b'\n')
             
             logging.info(f"加密成功：{output_path}")
         
@@ -233,109 +133,73 @@ class SecureFileCipher:
             logging.error(f"加密失败：{str(e)}")
             raise
 
-    def decrypt_file(self, input_path, output_path):
-        """解密文件主流程"""
+    def decrypt_file(self, input_path, output_path, priv_key):
+        """安全解密流程"""
         logging.info(f"启动解密：{input_path} → {output_path}")
         
+        temp_file = None
         try:
             with open(input_path, 'rb') as fin:
-                # 读取文件头
+                # 读取元数据
                 header = base64.urlsafe_b64decode(fin.readline().strip())
+                encrypted_key = base64.urlsafe_b64decode(fin.readline().strip())
                 stored_hash = base64.urlsafe_b64decode(fin.readline().strip())
                 
-                # 解析头数据
+                # 解析并验证文件头
                 salt = header[:SALT_LENGTH]
-                iv_aes = header[SALT_LENGTH:SALT_LENGTH+IV_AES_LENGTH]
-                nonce_chacha = header[SALT_LENGTH+IV_AES_LENGTH:SALT_LENGTH+IV_AES_LENGTH+NONCE_CHACHA_LENGTH]
-                rsa_key_length = RSA_KEY_SIZE // 8
-                rsa_encrypted_key = header[SALT_LENGTH+IV_AES_LENGTH+NONCE_CHACHA_LENGTH:SALT_LENGTH+IV_AES_LENGTH+NONCE_CHACHA_LENGTH+rsa_key_length]
-                priv_key = serialization.load_der_private_key(
-                    header[SALT_LENGTH+IV_AES_LENGTH+NONCE_CHACHA_LENGTH+rsa_key_length:],
-                    password=None,
-                    backend=self.backend
-                )
+                nonce = header[SALT_LENGTH:SALT_LENGTH+NONCE_LENGTH]
+                _, hmac_key = self._derive_keys(salt)  # 仅派生HMAC密钥用于验证
+                self._validate_header(header, hmac_key)
                 
-                # 密钥派生
-                derived_key = self._derive_keys(salt)
-                keys = (
-                    derived_key[:32],
-                    derived_key[32:64],
-                    derived_key[64:96],
-                    derived_key[96:]
-                )
-                
-                # 解密AES密钥
-                aes_key = priv_key.decrypt(
-                    rsa_encrypted_key,
-                    asym_padding.OAEP(
-                        mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
-                        algorithm=hashes.SHA512(),
-                        label=None
+                # 解密ChaCha密钥
+                try:
+                    chacha_key = priv_key.decrypt(
+                        encrypted_key,
+                        asym_padding.OAEP(
+                            mgf=asym_padding.MGF1(algorithm=hashes.SHA512()),
+                            algorithm=hashes.SHA512(),
+                            label=None
+                        )
                     )
-                )
+                except ValueError as e:
+                    logging.error("密钥解密失败，可能是密钥不匹配或数据损坏", exc_info=True)
+                    raise ValueError(f"密钥解密失败：{str(e)}") from e
                 
                 # 创建安全临时文件
-                temp_file = None
-                try:
-                    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                        temp_file = tmp.name
-                        processor = StreamProcessor('decrypt')
-                        
-                        with open(temp_file, 'wb') as fout:
-                            file_size = os.path.getsize(input_path) - fin.tell()
-                            with tqdm(total=file_size, unit='B', unit_scale=True, desc="解密进度") as pbar:
-                                while True:
-                                    line = fin.readline()
-                                    if not line:
-                                        processed = processor.process_chunk(b'', is_final=True)
-                                        if processed:
-                                            fout.write(processed)
-                                        break
-                                    
-                                    encrypted = base64.urlsafe_b64decode(line.strip())
-                                    chacha = ChaCha20Poly1305(keys[1])
-                                    aes_data = chacha.decrypt(nonce_chacha, encrypted, None)
-                                    
-                                    # 创建解密器（移除with语句）
-                                    decryptor = Cipher(
-                                        algorithms.AES(aes_key),
-                                        modes.CBC(iv_aes),
-                                        backend=self.backend
-                                    ).decryptor()
-                                    
-                                    decrypted = decryptor.update(aes_data) + decryptor.finalize()
-                                    processed = processor.process_chunk(decrypted)
-                                    if processed:
-                                        fout.write(processed)
-                                    
-                                    pbar.update(len(line))
+                with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                    temp_file = tmp.name
+                    cipher = ChaCha20Poly1305(chacha_key)
                     
-                    # 验证完整性
-                    actual_hash = self._calculate_file_hash(temp_file)
-                    if actual_hash != stored_hash:
-                        raise ValueError("文件完整性验证失败")
-                    
-                    # Windows兼容处理
-                    if os.path.exists(output_path):
-                        os.remove(output_path)
-                    os.replace(temp_file, output_path)
-                    logging.info(f"解密成功：{output_path}")
+                    # 一次性解密整个文件
+                    encrypted_data = base64.urlsafe_b64decode(fin.read().strip())
+                    decrypted = cipher.decrypt(nonce, encrypted_data, None)
+                    tmp.write(decrypted)
                 
-                finally:
-                    if temp_file and os.path.exists(temp_file):
-                        try:
-                            os.remove(temp_file)
-                        except:
-                            pass
+                # 验证完整性
+                actual_hash = self._calculate_file_hash(temp_file)
+                if actual_hash != stored_hash:
+                    raise ValueError("文件哈希不匹配，可能被篡改")
+                
+                # 安全移动文件
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+                os.replace(temp_file, output_path)
+                logging.info(f"解密成功：{output_path}")
         
         except Exception as e:
             if output_path and os.path.exists(output_path):
                 os.remove(output_path)
-            logging.error(f"解密失败：{str(e)}")
+            logging.error(f"解密失败：{str(e)}", exc_info=True)
             raise
+        finally:
+            if temp_file and os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except Exception as e:
+                    logging.warning(f"临时文件清理失败：{str(e)}")
 
     def _calculate_file_hash(self, file_path):
-        """计算文件BLAKE2b哈希"""
+        """计算文件的BLAKE2b哈希"""
         h = blake2b(digest_size=64)
         try:
             with open(file_path, 'rb') as f:
@@ -347,6 +211,16 @@ class SecureFileCipher:
             return h.digest()
         except IOError as e:
             raise RuntimeError(f"文件读取失败：{str(e)}") from e
+
+def generate_rsa_keypair():
+    """生成RSA密钥对"""
+    priv_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=RSA_KEY_SIZE,
+        backend=default_backend()
+    )
+    pub_key = priv_key.public_key()
+    return priv_key, pub_key
 
 def find_files(paths, recursive=False):
     file_list = []
@@ -366,9 +240,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="安全文件加密工具 v5.0（支持批量处理）",
         epilog="使用示例：\n"
-               "  加密多个文件：python cipher.py -e -i file1.txt file2.jpg\n"
-               "  加密整个目录：python cipher.py -e -i dir/*\n"
-               "  指定输出目录：python cipher.py -e -i data.txt -o ./encrypted/"
+               "  加密多个文件：python cipher.py -e -i file1.txt file2.jpg -k pub_key.pem\n"
+               "  解密文件：python cipher.py -d -i encrypted.enc -k private_key.pem"
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('-e', '--encrypt', action='store_true', help='加密模式')
@@ -377,6 +250,7 @@ def main():
     parser.add_argument('-i', '--input', required=True, nargs='+', help='输入文件路径（支持多个文件）')
     parser.add_argument('-o', '--output', help='输出目录路径（可选）')
     parser.add_argument('-r', '--recursive', action='store_true', help='递归处理目录')
+    parser.add_argument('-k', '--key', required=True, help='加密模式使用公钥文件路径，解密模式使用私钥文件路径')
     
     args = parser.parse_args()
     
@@ -389,11 +263,30 @@ def main():
         password = getpass("请输入密码：")
         cipher = SecureFileCipher(password)
 
+        # 加载密钥
+        if args.encrypt:
+            # 加密模式：加载公钥
+            with open(args.key, "rb") as key_file:
+                pub_key = serialization.load_pem_public_key(
+                    key_file.read(),
+                    backend=default_backend()
+                )
+            priv_key = None
+        else:
+            # 解密模式：加载私钥
+            with open(args.key, "rb") as key_file:
+                priv_key = serialization.load_pem_private_key(
+                    key_file.read(),
+                    password=None,
+                    backend=default_backend()
+                )
+            pub_key = None  # 解密不需要公钥
+
         # 预处理输出目录
         output_dir = None
         if args.output:
             output_dir = os.path.normpath(args.output)
-            os.makedirs(output_dir, exist_ok=True)  # 确保目录存在
+            os.makedirs(output_dir, exist_ok=True)
             if not os.path.isdir(output_dir):
                 raise ValueError("输出路径必须是一个目录")
 
@@ -412,7 +305,7 @@ def main():
                 # 保留原始路径结构
                 relative_path = os.path.relpath(input_path, start=os.path.commonpath(args.input))
                 output_path = os.path.join(output_dir, relative_path + ('.enc' if args.encrypt else '.dec'))
-                os.makedirs(os.path.dirname(output_path), exist_ok=True)  # 自动创建子目录
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
             else:
                 base_name = os.path.splitext(input_path)[0]
                 output_path = f"{base_name}.enc" if args.encrypt else f"{base_name}.dec"
@@ -427,7 +320,7 @@ def main():
                     skip_files.append(input_path)
                     continue
                 elif overwrite == 'a':
-                    overwrite_all = True  # 标记后续全部覆盖
+                    overwrite_all = True
 
         # 批量处理
         success_count = 0
@@ -452,9 +345,9 @@ def main():
 
                 # 执行操作
                 if args.encrypt:
-                    cipher.encrypt_file(input_path, output_path)
+                    cipher.encrypt_file(input_path, output_path, pub_key)
                 else:
-                    cipher.decrypt_file(input_path, output_path)
+                    cipher.decrypt_file(input_path, output_path, priv_key)
                 
                 success_count += 1
 
